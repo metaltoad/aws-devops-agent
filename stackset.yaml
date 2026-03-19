@@ -1,0 +1,49 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Deploys the MT_Devops_Agent IAM role to allow AWS DevOps Agent cross-account access.
+
+Resources:
+  MTDevopsAgentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: MT_Devops_Agent
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: aidevops.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceArn: arn:aws:aidevops:us-east-1:831442996354:agentspace/7002ac92-5fc8-4222-b661-95fe42548d80
+                aws:SourceAccount: "831442996354"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AIOpsAssistantPolicy
+      Policies:
+        - PolicyName: MT_Devops_Agent_Inline
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AllowAwsSupportActions
+                Effect: Allow
+                Action:
+                  - support:CreateCase
+                  - support:DescribeCases
+                Resource: "*"
+              - Sid: AllowExpandedAIOpsAssistantPolicy
+                Effect: Allow
+                Action:
+                  - aidevops:GetKnowledgeItem
+                  - aidevops:ListKnowledgeItems
+                  - eks:AccessKubernetesApi
+                  - synthetics:GetCanaryRuns
+                  - route53:GetHealthCheckStatus
+                  - resource-explorer-2:Search
+                  - codedeploy:GetDeploymentTarget
+                  - ram:GetResourceShares
+                Resource: "*"
+              - Sid: AllowCreateServiceLinkedRoles
+                Effect: Allow
+                Action:
+                  - iam:CreateServiceLinkedRole
+                Resource: arn:aws:iam::*:role/aws-service-role/resource-explorer-2.amazonaws.com/AWSServiceRoleForResourceExplorer
