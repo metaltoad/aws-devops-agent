@@ -1,8 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  DEVOPS-3058 - Posts AWS DevOps Agent investigation results back to Jira work
-  items as comments. Subscribes to all investigation lifecycle events
-  (Completed, Linked, Failed, Timed Out, Cancelled, Skipped).
+  Posts AWS DevOps Agent investigation results back to Jira work items as
+  comments. Subscribes to all investigation lifecycle events (Completed,
+  Linked, Failed, Timed Out, Cancelled, Skipped).
 
   Adapted from the AWS TAM reference pattern with two corrections required for
   scoped Atlassian service-account tokens:
@@ -54,7 +54,7 @@ Resources:
     Type: AWS::SecretsManager::Secret
     Properties:
       Name: devops-agent-jira-callback
-      Description: Atlassian credentials for the DevOps Agent Jira callback (DEVOPS-3058)
+      Description: Atlassian credentials for the DevOps Agent Jira callback
       SecretString: !Sub |
         {
           "cloudId": "${JiraCloudId}",
