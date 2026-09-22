@@ -1,8 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  DEVOPS-3059 - IAM role assumed by AWS DevOps Agent to send and receive
-  Slack messages for this Agent Space (bidirectional communication). Passed
-  as bidirectional.roleArn on the Slack AssociateService call. See the inline
+  IAM role assumed by AWS DevOps Agent to send and receive Slack messages for
+  this Agent Space (bidirectional communication). Passed as
+  bidirectional.roleArn on the Slack AssociateService call. See the inline
   comments below for why sts:TagSession is required alongside sts:AssumeRole.
 
 #
@@ -10,9 +10,9 @@ Description: >
 # aidevops.amazonaws.com, scoped by SourceAccount + SourceArn (agent space ARN).
 # AssociateService validates this and rejects the role otherwise, citing
 # "AIDevOpsChannelAccessRoleTemplate" in the error message -- confirmed empirically
-# against this account (DEVOPS-3059) when the trust policy only granted
-# sts:AssumeRole. AWS does not appear to publish that template's exact text
-# elsewhere, so this comment is the record of what it actually requires.
+# against this account when the trust policy only granted sts:AssumeRole. AWS does
+# not appear to publish that template's exact text elsewhere, so this comment is
+# the record of what it actually requires.
 #
 # Only permissions attached are the AWS-managed AIDevOpsChannelAccessPolicy (chat
 # send/receive). This role has no AWS resource access -- that stays on the separate
@@ -31,8 +31,8 @@ Resources:
     Properties:
       RoleName: devops-agent-slack-channel-access-role
       Description: >
-        DEVOPS-3059 - Assumed by AWS DevOps Agent to exchange messages with
-        the Slack workspace for bidirectional communication.
+        Assumed by AWS DevOps Agent to exchange messages with the Slack
+        workspace for bidirectional communication.
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:

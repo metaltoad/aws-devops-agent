@@ -16,7 +16,7 @@ start a conversation and get a threaded reply.
 | Slack channel | `C0C3P4HMD34` (private) |
 | Association | `0d547fb1-605a-4e83-b82b-9b74947dba94` |
 | Bidirectional role | `arn:aws:iam::831442996354:role/devops-agent-slack-channel-access-role` |
-| IAM role stack | `cfn-slack-devops-agent-role.yaml` -> stack `devops-agent-slack-channel-access` |
+| IAM role stack | `cloudformation/slack-devops-agent-role.yaml` -> stack `devops-agent-slack-channel-access` |
 | Setup script | `scripts/setup-slack-devops-agent.sh` |
 
 ## Status against the acceptance criteria
@@ -92,8 +92,8 @@ Slack association, but not the bidirectional half this ticket needs. So, as with
 missing `ToolDetails`, the association itself goes through the API/CLI.
 
 The IAM role is a plain `AWS::IAM::Role` with no DevOps-Agent-specific CloudFormation
-gap, so it lives in CloudFormation (`cfn-slack-devops-agent-role.yaml`) like the rest of
-this repo's IaC, rather than being created ad hoc by a script.
+gap, so it lives in CloudFormation (`cloudformation/slack-devops-agent-role.yaml`) like
+the rest of this repo's IaC, rather than being created ad hoc by a script.
 
 ## The bidirectional role's trust policy: sts:TagSession is required
 
@@ -125,9 +125,10 @@ be attributable to a specific interaction.
 
 Confirmed empirically against this account: the role deployed with only
 `sts:AssumeRole` was rejected with the error above; adding `sts:TagSession` and
-redeploying fixed it. `cfn-slack-devops-agent-role.yaml` grants both from the start.
-AWS does not appear to publish the exact `AIDevOpsChannelAccessRoleTemplate` trust
-policy text anywhere in its docs, so this is the record of what it actually requires.
+redeploying fixed it. `cloudformation/slack-devops-agent-role.yaml` grants both from the
+start. AWS does not appear to publish the exact `AIDevOpsChannelAccessRoleTemplate`
+trust policy text anywhere in its docs, so this is the record of what it actually
+requires.
 
 ```yaml
 AssumeRolePolicyDocument:
@@ -322,7 +323,7 @@ task is what closed that gap for Slack; the same approach (a deliberate low-prio
 
 ```bash
 aws cloudformation deploy \
-  --template-file cfn-slack-devops-agent-role.yaml \
+  --template-file cloudformation/slack-devops-agent-role.yaml \
   --stack-name devops-agent-slack-channel-access \
   --capabilities CAPABILITY_NAMED_IAM \
   --region us-east-1 --profile mt-media
@@ -352,8 +353,8 @@ script detects the existing association by `serviceId` first.
 
 ## Files
 
-- `cfn-slack-devops-agent-role.yaml` — IAM role for bidirectional Slack access,
-  deployed as stack `devops-agent-slack-channel-access`.
+- `cloudformation/slack-devops-agent-role.yaml` — IAM role for bidirectional Slack
+  access, deployed as stack `devops-agent-slack-channel-access`.
 - `scripts/setup-slack-devops-agent.sh` — associates the Slack service with this Agent
   Space and a chosen channel; dry-run by default.
 

@@ -3,8 +3,6 @@
 # Associates the already-registered Slack workspace ("Metal Toad") with the MT AWS
 # DevOps Agent, binding a private Slack channel for bidirectional communication.
 #
-# DEVOPS-3059
-#
 # IMPORTANT: a Slack service is already registered on this account (serviceId
 # 9a197d96-f4bc-43cc-a5f0-db0cb2c8377f, workspaceId T025YJAB8, "Metal Toad"), created
 # 2026-03-30. It was never associated with this Agent Space, so before this ticket the
@@ -20,7 +18,7 @@
 # Bidirectional mode requires an IAM role that AWS DevOps Agent assumes to exchange
 # Slack messages. That role does not come from AssociateService/UpdateAssociation --
 # it must already exist. This repo provisions it via CloudFormation:
-#   cfn-slack-devops-agent-role.yaml -> stack devops-agent-slack-channel-access
+#   cloudformation/slack-devops-agent-role.yaml -> stack devops-agent-slack-channel-access
 # Deploy that stack first (or pass --role-arn to point at a different role) before
 # running this script with --apply.
 #
@@ -47,7 +45,7 @@ SLACK_WORKSPACE_ID="${SLACK_WORKSPACE_ID:-T025YJAB8}"
 SLACK_WORKSPACE_NAME="${SLACK_WORKSPACE_NAME:-Metal Toad}"
 
 # Role AWS DevOps Agent assumes for bidirectional Slack access. Defaults to the role
-# provisioned by cfn-slack-devops-agent-role.yaml.
+# provisioned by cloudformation/slack-devops-agent-role.yaml.
 DEFAULT_ROLE_ARN="arn:aws:iam::${EXPECTED_ACCOUNT}:role/devops-agent-slack-channel-access-role"
 ROLE_ARN="${SLACK_BIDIRECTIONAL_ROLE_ARN:-$DEFAULT_ROLE_ARN}"
 
@@ -139,9 +137,9 @@ check_role_exists() {
   local arn="$1"
   local name="${arn##*/}"
   aws iam get-role --role-name "$name" --profile "$PROFILE" >/dev/null 2>&1 \
-    || fail "IAM role '$name' not found in this account. Deploy cfn-slack-devops-agent-role.yaml
-  first:
-    aws cloudformation deploy --template-file cfn-slack-devops-agent-role.yaml \\
+    || fail "IAM role '$name' not found in this account. Deploy
+  cloudformation/slack-devops-agent-role.yaml first:
+    aws cloudformation deploy --template-file cloudformation/slack-devops-agent-role.yaml \\
       --stack-name devops-agent-slack-channel-access --capabilities CAPABILITY_NAMED_IAM \\
       --profile $PROFILE --region $REGION
   Or pass --role-arn / SLACK_BIDIRECTIONAL_ROLE_ARN to use a different, existing role."
