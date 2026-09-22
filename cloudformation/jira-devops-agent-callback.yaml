@@ -1,0 +1,442 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  DEVOPS-3058 - Posts AWS DevOps Agent investigation results back to Jira work
+  items as comments. Subscribes to all investigation lifecycle events
+  (Completed, Linked, Failed, Timed Out, Cancelled, Skipped).
+
+  Adapted from the AWS TAM reference pattern with two corrections required for
+  scoped Atlassian service-account tokens:
+    1. Calls the Atlassian Platform API Gateway (api.atlassian.com/ex/jira/<cloudId>)
+       instead of the site URL. Scoped tokens are rejected by site URLs.
+    2. Uses Bearer auth instead of Basic (email:token). Service-account API keys
+       are Bearer credentials; Basic auth is for classic personal tokens.
+
+Parameters:
+  JiraCloudId:
+    Type: String
+    Description: >
+      Atlassian Cloud ID (site UUID) - the string after /s/ in your admin.atlassian.com
+      URL, or from the getAccessibleAtlassianResources MCP tool. NOT the Organization ID.
+    AllowedPattern: ^[0-9a-fA-F-]{36}$
+
+  JiraBaseUrl:
+    Type: String
+    Description: >
+      Jira site base URL (e.g. https://metaltoad.atlassian.net). Used only to build
+      human-readable links in log output, not for API calls.
+    AllowedPattern: ^https://.+$
+
+  JiraApiToken:
+    Type: String
+    NoEcho: true
+    Description: >
+      Atlassian API token. Stored in Secrets Manager; never emitted in stack outputs.
+
+  JiraEmail:
+    Type: String
+    Default: ""
+    Description: >
+      Atlassian account email. Set this to use a PERSONAL API token (Basic auth
+      against the site URL) - no org admin rights needed. Leave EMPTY to use a
+      SERVICE ACCOUNT API key (Bearer auth against the api.atlassian.com gateway),
+      which is the preferred long-term setup but requires an admin to grant the
+      service account Jira product and project access.
+
+  AgentSpaceId:
+    Type: String
+    Default: 7002ac92-5fc8-4222-b661-95fe42548d80
+    Description: >
+      Agent Space to scope IAM permissions to. Defaults to the MetalToad Corp
+      Agent Space in mt-media.
+
+Resources:
+  JiraSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: devops-agent-jira-callback
+      Description: Atlassian credentials for the DevOps Agent Jira callback (DEVOPS-3058)
+      SecretString: !Sub |
+        {
+          "cloudId": "${JiraCloudId}",
+          "jiraBaseUrl": "${JiraBaseUrl}",
+          "email": "${JiraEmail}",
+          "apiToken": "${JiraApiToken}"
+        }
+
+  CallbackLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: devops-agent-jira-callback-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: devops-agent-jira-callback-inline
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Read-only against the agent journal and backlog. No mutating
+              # aidevops actions - this Lambda only reads investigation results.
+              - Sid: ReadInvestigationResults
+                Effect: Allow
+                Action:
+                  - aidevops:ListJournalRecords
+                  - aidevops:GetBacklogTask
+                  - aidevops:ListBacklogTasks
+                Resource: !Sub arn:aws:aidevops:${AWS::Region}:${AWS::AccountId}:agentspace/${AgentSpaceId}
+              - Sid: ReadJiraCredential
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref JiraSecret
+
+  CallbackLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: devops-agent-jira-callback
+      Runtime: python3.13
+      Handler: index.lambda_handler
+      Timeout: 60
+      MemorySize: 256
+      Role: !GetAtt CallbackLambdaRole.Arn
+      Environment:
+        Variables:
+          JIRA_SECRET_ID: !Ref JiraSecret
+      Code:
+        ZipFile: |
+          import base64
+          import json
+          import os
+          import re
+          from urllib import error, request
+
+          import boto3
+
+          secrets_client = boto3.client("secretsmanager")
+          _jira_config = None
+
+
+          def get_devops_client():
+              """The aidevops API is recent; a stale bundled botocore will not know it.
+
+              Fail loudly with a clear message rather than a generic AttributeError so
+              the remedy (attach a newer boto3 layer) is obvious from the logs.
+              """
+              try:
+                  return boto3.client("devops-agent", region_name=os.environ["AWS_REGION"])
+              except Exception as exc:
+                  raise RuntimeError(
+                      "Could not create a 'devops-agent' boto3 client. The runtime's "
+                      "bundled botocore is probably too old for the aidevops API. "
+                      "Attach a Lambda layer with a current boto3. Original error: %s" % exc
+                  )
+
+
+          def get_jira_config():
+              global _jira_config
+              if _jira_config is None:
+                  resp = secrets_client.get_secret_value(SecretId=os.environ["JIRA_SECRET_ID"])
+                  _jira_config = json.loads(resp["SecretString"])
+              return _jira_config
+
+
+          def get_summary(devops_client, agent_space_id, execution_id):
+              """Pull the investigation write-up from the agent journal."""
+              if not execution_id:
+                  return None
+              for record_type in ("investigation_summary_md", "investigation_result"):
+                  try:
+                      resp = devops_client.list_journal_records(
+                          agentSpaceId=agent_space_id,
+                          executionId=execution_id,
+                          recordType=record_type,
+                      )
+                      records = resp.get("records", [])
+                      if records:
+                          content = records[0].get("content", "")
+                          try:
+                              return json.loads(content).get("text", content)
+                          except (json.JSONDecodeError, TypeError):
+                              return content
+                  except Exception as exc:
+                      print("Could not read journal record %s: %s" % (record_type, exc))
+              return None
+
+
+          def extract_jira_key(reference_id):
+              if not reference_id:
+                  return ""
+              match = re.match(r"^([A-Z][A-Z0-9]*-\d+)", reference_id)
+              return match.group(1) if match else reference_id
+
+
+          def build_comment(event_type, summary, linked_from=None, reason=None):
+              reason_line = "\nReason: %s" % reason if reason else ""
+              if event_type == "Investigation Completed":
+                  return (
+                      "AWS DevOps Agent - Investigation Completed",
+                      summary or "Investigation completed but no summary was available.",
+                  )
+              if event_type == "Investigation Linked":
+                  text = "This incident resembles a previously investigated issue."
+                  if linked_from:
+                      text += "\nLinked to the original investigation from: %s" % linked_from
+                  text += reason_line
+                  if summary:
+                      text += "\n\n%s" % summary
+                  return "AWS DevOps Agent - Investigation Linked", text
+              headings = {
+                  "Investigation Failed": (
+                      "AWS DevOps Agent - Investigation Failed",
+                      "The automated investigation could not complete. Investigate manually.",
+                  ),
+                  "Investigation Timed Out": (
+                      "AWS DevOps Agent - Investigation Timed Out",
+                      "The automated investigation timed out. Investigate manually.",
+                  ),
+                  "Investigation Cancelled": (
+                      "AWS DevOps Agent - Investigation Cancelled",
+                      "The automated investigation was cancelled.",
+                  ),
+                  "Investigation Skipped": (
+                      "AWS DevOps Agent - Investigation Skipped",
+                      "The investigation was skipped based on Agent Space criteria.",
+                  ),
+              }
+              if event_type in headings:
+                  heading, body = headings[event_type]
+                  return heading, body + reason_line
+              return (
+                  "AWS DevOps Agent - %s" % event_type,
+                  summary or "Event: %s%s" % (event_type, reason_line),
+              )
+
+
+          def post_jira_comment(issue_key, heading, body_text):
+              """Post an ADF comment, trying each URL form the credential might need.
+
+              Atlassian accepts different combinations depending on credential type:
+                - scoped tokens (personal or service account) require the
+                  api.atlassian.com gateway; the site URL rejects them
+                - classic unscoped personal tokens work against the site URL
+              Basic auth is used when an email is configured, Bearer otherwise.
+
+              Jira Cloud treats a rejected credential as anonymous, so a private
+              issue returns 404 rather than 401. That makes "wrong URL form" and
+              "wrong credential" look identical from the status code alone - hence
+              trying both forms and logging each outcome.
+              """
+              config = get_jira_config()
+              email = (config.get("email") or "").strip()
+              cloud_id = config.get("cloudId", "")
+              base = config["jiraBaseUrl"].rstrip("/")
+
+              if email:
+                  auth_header = "Basic %s" % base64.b64encode(
+                      ("%s:%s" % (email, config["apiToken"])).encode()
+                  ).decode()
+              else:
+                  auth_header = "Bearer %s" % config["apiToken"]
+
+              candidates = []
+              if cloud_id:
+                  candidates.append(
+                      (
+                          "gateway",
+                          "https://api.atlassian.com/ex/jira/%s/rest/api/3/issue/%s/comment"
+                          % (cloud_id, issue_key),
+                      )
+                  )
+              candidates.append(
+                  ("site", "%s/rest/api/3/issue/%s/comment" % (base, issue_key))
+              )
+
+              payload = {
+                  "body": {
+                      "version": 1,
+                      "type": "doc",
+                      "content": [
+                          {
+                              "type": "heading",
+                              "attrs": {"level": 3},
+                              "content": [{"type": "text", "text": heading}],
+                          },
+                          {
+                              "type": "codeBlock",
+                              "attrs": {"language": "markdown"},
+                              "content": [{"type": "text", "text": body_text}],
+                          },
+                      ],
+                  }
+              }
+              body = json.dumps(payload).encode("utf-8")
+
+              for label, url in candidates:
+                  req = request.Request(
+                      url,
+                      data=body,
+                      headers={
+                          "Content-Type": "application/json",
+                          "Accept": "application/json",
+                          "Authorization": auth_header,
+                      },
+                      method="POST",
+                  )
+                  try:
+                      with request.urlopen(req, timeout=15) as resp:
+                          print(
+                              "Posted comment to %s via %s (HTTP %s)"
+                              % (issue_key, label, resp.status)
+                          )
+                          return resp.status
+                  except error.HTTPError as exc:
+                      print(
+                          "Attempt via %s failed for %s: HTTP %s - %s"
+                          % (
+                              label,
+                              issue_key,
+                              exc.code,
+                              exc.read().decode("utf-8", "replace"),
+                          )
+                      )
+                  except error.URLError as exc:
+                      print("Attempt via %s failed for %s: %s" % (label, issue_key, exc))
+              return None
+
+
+          def lambda_handler(event, context):
+              print("Received event: %s" % json.dumps(event))
+              devops_client = get_devops_client()
+
+              event_type = event.get("detail-type", "Unknown")
+              metadata = event["detail"]["metadata"]
+              task_id = metadata["task_id"]
+              execution_id = metadata.get("execution_id", "")
+              agent_space_id = metadata["agent_space_id"]
+
+              primary_key = ""
+              status_reason = ""
+              try:
+                  task = devops_client.get_backlog_task(
+                      agentSpaceId=agent_space_id, taskId=task_id
+                  ).get("task", {})
+                  primary_key = extract_jira_key(
+                      task.get("reference", {}).get("referenceId", "")
+                  )
+                  status_reason = task.get("statusReason", "")
+                  if not status_reason:
+                      meta = task.get("metadata", {})
+                      status_reason = (
+                          meta.get("canceledReason")
+                          or meta.get("failedReason")
+                          or meta.get("skippedReason")
+                          or ""
+                      )
+                  # A linked task defers to its primary: comment once, noting the link.
+                  if task.get("primaryTaskId"):
+                      primary = devops_client.get_backlog_task(
+                          agentSpaceId=agent_space_id, taskId=task["primaryTaskId"]
+                      )
+                      original_key = extract_jira_key(
+                          primary["task"].get("reference", {}).get("referenceId", "")
+                      )
+                      heading, body = build_comment(
+                          event_type, None, linked_from=original_key, reason=status_reason
+                      )
+                      post_jira_comment(primary_key, heading, body)
+                      return {
+                          "statusCode": 200,
+                          "event_type": event_type,
+                          "this_ticket": primary_key,
+                          "linked_from": original_key,
+                      }
+              except Exception as exc:
+                  print("Could not read backlog task %s: %s" % (task_id, exc))
+
+              if not primary_key:
+                  return {"statusCode": 200, "message": "No Jira key on task; skipped"}
+
+              # Fan out to any tasks the agent linked to this one.
+              linked = {}
+              try:
+                  for candidate in devops_client.list_backlog_tasks(
+                      agentSpaceId=agent_space_id
+                  ).get("tasks", []):
+                      if candidate.get("primaryTaskId") == task_id:
+                          key = extract_jira_key(
+                              candidate.get("reference", {}).get("referenceId", "")
+                          )
+                          if key:
+                              linked[key] = candidate.get("statusReason", "")
+              except Exception as exc:
+                  print("Could not list linked tasks: %s" % exc)
+
+              summary = None
+              if event_type in ("Investigation Completed", "Investigation Linked"):
+                  summary = get_summary(devops_client, agent_space_id, execution_id)
+
+              heading, body = build_comment(event_type, summary, reason=status_reason)
+              post_jira_comment(primary_key, heading, body)
+              for linked_key, linked_reason in linked.items():
+                  heading, body = build_comment(
+                      event_type, summary, linked_from=primary_key, reason=linked_reason
+                  )
+                  post_jira_comment(linked_key, heading, body)
+
+              return {
+                  "statusCode": 200,
+                  "event_type": event_type,
+                  "primary_ticket": primary_key,
+                  "linked_tickets": list(linked),
+              }
+
+  InvestigationEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: devops-agent-jira-callback
+      Description: Routes DevOps Agent investigation lifecycle events to the Jira callback
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.aidevops
+        detail-type:
+          - Investigation Completed
+          - Investigation Linked
+          - Investigation Failed
+          - Investigation Timed Out
+          - Investigation Cancelled
+          - Investigation Skipped
+      Targets:
+        - Id: JiraCallbackLambda
+          Arn: !GetAtt CallbackLambda.Arn
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CallbackLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt InvestigationEventRule.Arn
+
+Outputs:
+  LambdaFunctionArn:
+    Description: Callback Lambda ARN
+    Value: !GetAtt CallbackLambda.Arn
+
+  LambdaLogGroup:
+    Description: CloudWatch log group to watch when testing
+    Value: !Sub /aws/lambda/${CallbackLambda}
+
+  EventBridgeRuleArn:
+    Description: EventBridge rule ARN
+    Value: !GetAtt InvestigationEventRule.Arn
+
+  SecretArn:
+    Description: Secrets Manager ARN holding the Atlassian credential
+    Value: !Ref JiraSecret
