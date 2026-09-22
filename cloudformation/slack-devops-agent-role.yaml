@@ -1,0 +1,61 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  IAM role assumed by AWS DevOps Agent to send and receive Slack messages for
+  this Agent Space (bidirectional communication). Passed as
+  bidirectional.roleArn on the Slack AssociateService call. See the inline
+  comments below for why sts:TagSession is required alongside sts:AssumeRole.
+
+#
+# This role's trust policy needs BOTH sts:AssumeRole and sts:TagSession granted to
+# aidevops.amazonaws.com, scoped by SourceAccount + SourceArn (agent space ARN).
+# AssociateService validates this and rejects the role otherwise, citing
+# "AIDevOpsChannelAccessRoleTemplate" in the error message -- confirmed empirically
+# against this account when the trust policy only granted sts:AssumeRole. AWS does
+# not appear to publish that template's exact text elsewhere, so this comment is
+# the record of what it actually requires.
+#
+# Only permissions attached are the AWS-managed AIDevOpsChannelAccessPolicy (chat
+# send/receive). This role has no AWS resource access -- that stays on the separate
+# MT_Devops_Agent / DevOpsAgentRole-AgentSpace-* roles used for investigations.
+Parameters:
+  AgentSpaceId:
+    Type: String
+    Default: 7002ac92-5fc8-4222-b661-95fe42548d80
+    Description: >
+      Agent Space this role's trust policy is scoped to. Defaults to the
+      MetalToad Corp Agent Space in mt-media.
+
+Resources:
+  SlackChannelAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: devops-agent-slack-channel-access-role
+      Description: >
+        Assumed by AWS DevOps Agent to exchange messages with the Slack
+        workspace for bidirectional communication.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: aidevops.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub arn:aws:aidevops:${AWS::Region}:${AWS::AccountId}:agentspace/${AgentSpaceId}
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AIDevOpsChannelAccessPolicy
+
+Outputs:
+  RoleArn:
+    Description: >
+      Pass this as the bidirectional.roleArn field on the Slack
+      AssociateService/UpdateAssociation call.
+    Value: !GetAtt SlackChannelAccessRole.Arn
+
+  RoleName:
+    Value: !Ref SlackChannelAccessRole
